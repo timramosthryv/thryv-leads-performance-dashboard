@@ -42,6 +42,7 @@
   .chip{border:1px solid var(--line); background:#fff; color:var(--sub); padding:6px 12px; border-radius:20px;
     font-size:12.5px; cursor:pointer; font-weight:600;}
   .chip.on{background:var(--accent); color:#fff; border-color:var(--accent);}
+  .rangesel{padding:5px 8px; border:1px solid var(--line); border-radius:8px; font-size:12px; color:var(--ink); background:#fff;}
   .tabs{display:flex; gap:4px; border-bottom:1px solid var(--line); margin-top:8px;}
   .tab{padding:11px 16px; font-size:14px; font-weight:600; color:var(--sub); cursor:pointer;
     border-bottom:2px solid transparent; margin-bottom:-1px;}
@@ -131,11 +132,20 @@
 <div class="wrap">
   <div class="controls">
     <div class="filtergroup">
-      <span class="lbl">Year</span>
-      <span class="chip" data-year="all">All</span>
-      <span class="chip" data-year="2024">2024</span>
-      <span class="chip" data-year="2025">2025</span>
-      <span class="chip" data-year="2026">2026</span>
+      <span class="lbl">Range</span>
+      <span class="chip" data-range="all">All</span>
+      <span class="chip" data-range="m1">This month</span>
+      <span class="chip" data-range="lastmonth">Last month</span>
+      <span class="chip" data-range="last3">Last 3 mo</span>
+      <span class="chip" data-range="last6">Last 6 mo</span>
+      <span class="chip" data-range="last12">Last 12 mo</span>
+      <span class="chip" data-range="ytd">YTD</span>
+    </div>
+    <div class="filtergroup">
+      <span class="lbl">Custom</span>
+      <select id="fromSel" class="rangesel"></select>
+      <span style="color:var(--faint); font-size:12px;">to</span>
+      <select id="toSel" class="rangesel"></select>
     </div>
     <div class="spacer" style="flex:1"></div>
     <span class="hint" id="dragTip" style="display:none;">Builder mode: drag an updated .xlsx anywhere on this page, then click Save data.js.</span>
@@ -215,7 +225,8 @@
   var GENERIC_POD={'Pre-Sales':1};
   var MODEL=null;            // parsed model
   var LAST_AOA=null;         // last raw rows loaded, for re-export
-  var yearFilter='all';
+  var rangeMode='all';       // all | m1 | lastmonth | last3 | last6 | last12 | ytd | custom
+  var customFrom=null, customTo=null;
   var activeView='overview';
   var rendered={};           // which views have been rendered for current data+filter
   var chartRegistry=[];      // echarts instances of active view
@@ -273,7 +284,37 @@
   }
 
   function byName(nm){ return MODEL.metrics.filter(function(m){ return m.name.toLowerCase()===nm.toLowerCase(); })[0]; }
-  function visiblePeriods(){ return MODEL.periods.filter(function(p){ return yearFilter==='all' || String(p.year)===yearFilter; }); }
+  function idxOf(lab){ for(var i=0;i<MODEL.periods.length;i++){ if(MODEL.periods[i].label===lab) return i; } return -1; }
+  function visiblePeriods(){ var ps=MODEL.periods;
+    switch(rangeMode){
+      case 'ytd': var cy=currentYear(); return ps.filter(function(p){return p.year===cy;});
+      case 'm1': return ps.slice(-1);
+      case 'lastmonth': return ps.length>1?ps.slice(-2,-1):ps.slice(-1);
+      case 'last3': return ps.slice(-3);
+      case 'last6': return ps.slice(-6);
+      case 'last12': return ps.slice(-12);
+      case 'custom': var fi=idxOf(customFrom), ti=idxOf(customTo);
+        if(fi<0) fi=0; if(ti<0) ti=ps.length-1; if(fi>ti){var t=fi;fi=ti;ti=t;}
+        return ps.slice(fi,ti+1);
+      default: return ps.slice();
+    } }
+  function orderMetrics(list, section){
+    if(section==='Proposals'){
+      var ORDER=['Total Proposals Created','1 Proposal','2 Proposal','3 Proposal','Custom Proposal Request','Reseller','Declined','FSD'];
+      var rank=function(m){ for(var i=0;i<ORDER.length;i++){ if(m.name.indexOf(ORDER[i])>=0) return i; } return ORDER.length; };
+      return list.slice().sort(function(a,b){ var ra=rank(a), rb=rank(b); if(ra!==rb) return ra-rb; return list.indexOf(a)-list.indexOf(b); });
+    }
+    if(section==='Live Accounts'){
+      var tot=function(m){ var s=0; MODEL.periods.forEach(function(p){ var v=m.monthly[p.label]; if(v!=null) s+=Math.abs(v); }); return s; };
+      return list.slice().sort(function(a,b){
+        var at=a.isTotal?1:0, bt=b.isTotal?1:0;
+        if(at!==bt) return bt-at;                                   // summary totals first
+        if(at&&bt) return list.indexOf(a)-list.indexOf(b);          // keep totals in natural order
+        return tot(b)-tot(a);                                       // then cohorts by most activity
+      });
+    }
+    return list;
+  }
   function seriesFor(metric, periods){ return periods.map(function(p){ var v=metric.monthly[p.label]; return v==null?null:v; }); }
   function currentYear(){ return MODEL.years[MODEL.years.length-1]; }
   function ytdAvg(metric, yr){ var vals=MODEL.periods.filter(function(p){return p.year===yr;}).map(function(p){return metric.monthly[p.label];}).filter(function(v){return v!=null;}); if(!vals.length) return null; return Math.round(vals.reduce(function(a,b){return a+b;},0)/vals.length); }
@@ -286,8 +327,10 @@
   function valAxis(o){ return Object.assign({type:'value',splitLine:{lineStyle:{color:C.line}},axisLabel:{color:C.sub,formatter:function(v){return Number(v).toLocaleString();}}},o||{}); }
 
   /* ---------------- OVERVIEW ---------------- */
-  function scopeWord(){ if(yearFilter==='all'){ var ps=MODEL.periods; return ps.length?(pretty(ps[0].label)+' to '+pretty(ps[ps.length-1].label)):'all periods'; }
-    return String(yearFilter)===String(currentYear())?(yearFilter+' YTD'):String(yearFilter); }
+  function scopeWord(){ var vp=visiblePeriods(); if(!vp.length) return '';
+    if(rangeMode==='ytd') return currentYear()+' YTD';
+    var a=pretty(vp[0].label), b=pretty(vp[vp.length-1].label);
+    return vp.length===1 ? a : (a+' to '+b); }
   function scopeStats(m){ if(!m) return null; var per=visiblePeriods();
     var vals=[],last=null,lab=''; for(var i=0;i<per.length;i++){ var v=m.monthly[per[i].label]; if(v!=null){ vals.push(v); last=v; lab=per[i].label; } }
     var total=vals.reduce(function(a,b){return a+b;},0); var avg=vals.length?Math.round(total/vals.length):null;
@@ -407,7 +450,7 @@
   function renderSmall(containerId, section){
     var host=document.getElementById(containerId); host.innerHTML='';
     var per=visiblePeriods(); var cats=per.map(function(p){return p.label;});
-    MODEL.metrics.filter(function(m){return m.section===section;}).forEach(function(m){
+    orderMetrics(MODEL.metrics.filter(function(m){return m.section===section;}), section).forEach(function(m){
       var d=seriesFor(m,per);
       var nonNull=d.filter(function(v){return v!=null;});
       var card=document.createElement('div'); card.className='sm';
@@ -468,7 +511,7 @@
       legend:{type:'scroll',bottom:0,textStyle:{color:C.sub,fontSize:11}},
       xAxis:catAxis(cats), yAxis:valAxis({scale:true}),
       series:series.length?series:[{type:'line',data:[]}]});
-    document.getElementById('explorerSub').textContent = sel.length? (sel.length+' metric'+(sel.length>1?'s':'')+' selected · respects the year filter') : 'Pick any metrics on the left to compare them across time.';
+    document.getElementById('explorerSub').textContent = sel.length? (sel.length+' metric'+(sel.length>1?'s':'')+' selected · respects the selected range') : 'Pick any metrics on the left to compare them across time.';
   }
 
   /* ---------------- RAW ---------------- */
@@ -541,7 +584,15 @@
     var note=updatedLabel||('embedded '+new Date().toLocaleDateString());
     document.getElementById('updated').innerHTML='<span class="thru">Data through '+through+'</span><span class="note">'+note+'</span>';
     document.getElementById('dropzone').style.display='none';
+    populateRangeSelects();
     applyDataAndRender();
+  }
+  function populateRangeSelects(){
+    var from=document.getElementById('fromSel'), to=document.getElementById('toSel'); if(!from||!to||!MODEL.periods.length) return;
+    var opts=MODEL.periods.map(function(p){ return '<option value="'+p.label+'">'+pretty(p.label)+'</option>'; }).join('');
+    from.innerHTML=opts; to.innerHTML=opts;
+    customFrom=MODEL.periods[0].label; customTo=MODEL.periods[MODEL.periods.length-1].label;
+    from.value=customFrom; to.value=customTo;
   }
   function loadFromArrayBuffer(buf, updatedLabel){
     var wb=XLSX.read(buf,{type:'array',cellDates:false});
@@ -586,10 +637,12 @@
   }
 
   document.querySelectorAll('.tab').forEach(function(t){ t.addEventListener('click',function(){ switchView(t.dataset.view); }); });
-  document.querySelectorAll('.chip[data-year]').forEach(function(ch){ ch.addEventListener('click',function(){
-    document.querySelectorAll('.chip[data-year]').forEach(function(x){x.classList.remove('on');}); ch.classList.add('on');
-    yearFilter=ch.dataset.year; renderActive(); }); });
-  document.querySelector('.chip[data-year="all"]').classList.add('on');
+  function setRangeChip(mode){ document.querySelectorAll('.chip[data-range]').forEach(function(x){ x.classList.toggle('on', x.dataset.range===mode); }); }
+  document.querySelectorAll('.chip[data-range]').forEach(function(ch){ ch.addEventListener('click',function(){
+    rangeMode=ch.dataset.range; setRangeChip(rangeMode); renderActive(); }); });
+  setRangeChip('all');
+  document.getElementById('fromSel').addEventListener('change',function(){ rangeMode='custom'; customFrom=this.value; customTo=document.getElementById('toSel').value; setRangeChip('custom'); renderActive(); });
+  document.getElementById('toSel').addEventListener('change',function(){ rangeMode='custom'; customTo=this.value; customFrom=document.getElementById('fromSel').value; setRangeChip('custom'); renderActive(); });
   document.getElementById('typeLine').addEventListener('click',function(){ explorerType='line'; this.classList.add('on'); document.getElementById('typeBar').classList.remove('on'); drawExplorer(); });
   document.getElementById('typeBar').addEventListener('click',function(){ explorerType='bar'; this.classList.add('on'); document.getElementById('typeLine').classList.remove('on'); drawExplorer(); });
   document.getElementById('mSearch').addEventListener('input',buildMetricList);
